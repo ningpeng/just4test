@@ -49,6 +49,115 @@ size_t _strlcpy(char *dst, const char *src, size_t size)
     return len + strlen(src) - 1;
 }
 
+//LIKE strlcpy  , but return the end of the dest string
+char* _cpystrn(char *dst, const char *src, size_t n)
+{
+    if (n == 0) {
+        return dst;
+    }
+
+    while (--n) {
+        *dst = *src;
+
+        if (*dst == '\0') {
+            return dst;
+        }
+
+        dst++;
+        src++;
+    }
+
+    *dst = '\0';
+
+    return dst;
+}
+
+
+char* strlcat(char*  dest , const char* src , size_t len)
+{
+	
+}
+//search s2 in s1 with len limited
+//在指定大小一个字符串中是否有子字符串
+const char * _strnstr(const char *s1, size_t len, const char *s2)
+{
+    char  c1, c2;
+    size_t  n;
+
+    c2 = *(char *) s2++;
+
+    n = strlen(s2);
+
+    do {
+        do {
+            if (len-- == 0) {
+                return NULL;
+            }
+
+            c1 = *s1++;
+
+            if (c1 == 0) {
+                return NULL;
+            }
+
+        } while (c1 != c2);
+
+        if (n > len) {
+            return NULL;
+        }
+
+    } while (strncmp(s1, s2, n) != 0);
+
+    return --s1;
+}
+//search s2 (size n limited) in s1
+// 在一个字符串中是否有子指定大小的字符串
+const char * _strstrn(char *s1, char *s2, size_t n)
+{
+    char  c1, c2;
+
+    c2 = *(char *) s2++;
+
+    do {
+        do {
+            c1 = *s1++;
+
+            if (c1 == 0) {
+                return NULL;
+            }
+
+        } while (c1 != c2);
+
+    } while (strncmp(s1, (char *) s2, n) != 0);
+
+    return --s1;
+}
+
+int _atoi_n(u_char *line, size_t n)
+{
+    int  value;
+
+    if (n == 0) {
+        return 0;
+    }
+
+    for (value = 0; n--; line++) {
+        if (*line < '0' || *line > '9') {
+            return 0;
+        }
+
+        value = value * 10 + (*line - '0');
+    }
+
+    if (value < 0) {
+        return 0;
+
+    } else {
+        return value;
+    }
+}
+
+
 size_t pnx_strcpy2buf(char* dst, size_t size , const pnx_str_t *src)
 {
 	if (src->len < size)
@@ -73,8 +182,9 @@ char *pnx_strstr(const pnx_str_t *str, char *sub)
 	register char *bp;
 	register char *sp;
 
-    if (!*sub)
+    if (0==*sub)
 		return buf;
+	
     while (*buf) {
 		bp = buf;
 		sp = sub;

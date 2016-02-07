@@ -3,7 +3,7 @@
 //writen by ning 2012.11.26
 // 2015-4   增加匀速发送文件测试
 // 2015-4-21 改成cpp编译，清除warning
-#define _GNU_SOURCE
+//#define _GNU_SOURCE
 
 
 #include <fcntl.h>
@@ -36,6 +36,9 @@
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
+ 
+ #include "KfsClient.h"
+ using namespace KFS;
  
 
 typedef struct { int counter; } atomic_t;
@@ -618,6 +621,7 @@ typedef struct {
     int status;
     int stage;
     int handle_fd;
+	KfsClientPtr  kfs_client ;
 	pn_buffer_t req_init;
 	pn_buffer_t res_init;
 	pn_buffer_t uri_init;
@@ -1529,7 +1533,7 @@ void connection_make_get_header(pn_connection_t *conn) {
 			}
 		}		
 	
-	}
+	} //end of begin with "/ut"
 	else if(!strcmp(conn->uri->buff,"/hostdown"))
 	{
 		g_config.active_host_fail=1;
@@ -1544,19 +1548,50 @@ void connection_make_get_header(pn_connection_t *conn) {
 		conn->status = pn_http_200;
 		pn_buffer_append(conn->response, "HTTP/1.0 200 OK\r\n");
 	}
+	else if(!strcmp(conn->uri->buff,"/VOD"))
+	{
+		//open a kfs file
+		const char* kfs_path = conn->uri->buff + sizeof("/VOD") - 1;
+		char content_length[256];
+           
+		conn->kfs_client  = getKfsClientFactory()->GetClient("127.0.0.1", 20000);
+		
+		if(!conn->kfs_client)
+    	{
+    	    pn_buffer_append(conn->response, "HTTP/1.0 500 Internal Server Error - KFS GetClient\r\n");
+        }
+		else 
+		{
+			KfsFileStat statInfo;
+			int ret = conn->kfs_client->Stat( conn->uri->buff + strlen("/VOD"),  statInfo);
+			if (ret!=0)
+			{
+				conn->status = pn_http_notfound;
+				pn_buffer_append(conn->response, "HTTP/1.0 404 Not Found\r\n");
+				print_log(RSSLOG_LV_ERROR, "404 kfs open fail %s\n", kfs_path );
+			}
+			else
+			{
+				sprintf(content_length, "Content-Length: %lu\r\n", statInfo.size);
+				conn->handle_fd = conn->kfs_client->Open(kfs_path , O_RDONLY);				
+			}
+		
+	}
 	//normal web server to send local file to client
     else if (stat(conn->uri->buff, &stat_buf) == -1) {
+		//file or dir don't exist
         conn->status = pn_http_notfound;
         pn_buffer_append(conn->response, "HTTP/1.0 404 Not Found\r\n");
 		print_log(RSSLOG_LV_ERROR, "404 open fail %s\n", conn->uri->buff);
     } else {
         if (S_ISDIR(stat_buf.st_mode)) {
+			//open a dir
             pn_buffer_append(conn->uri, "index.html");
             if (stat(conn->uri->buff, &stat_buf) == -1) {
                 conn->status = pn_http_notfound;
                 pn_buffer_append(conn->response, "HTTP/1.0 404 Not Found\r\n");
             } else {
-				//ning OPEN DIR
+				//ning OPEN DIR don't find default file
 				
 				char content_length[256];
                 
@@ -1570,7 +1605,8 @@ void connection_make_get_header(pn_connection_t *conn) {
                 }
             }
         } else if (S_ISREG(stat_buf.st_mode)) {
-            char content_length[256];
+            //open a normal file
+			char content_length[256];
            
             conn->handle_fd = open(conn->uri->buff, O_RDONLY | O_NOATIME | O_LARGEFILE | O_NONBLOCK );
             if (conn->handle_fd < 0 ) {
@@ -1806,9 +1842,113 @@ void* sendfile_thread(void* arg)
 	}
 }
 
+//http response 发送文件的主体 - KFS 
+void connection_kfs_send_body(pn_connection_t *conn)
+{
+    char buff[READ_SIZE+3];
+    int bytes;
+   	int bufsize = SEND_SIZE; //only for set socket send buffer
+
+	
+    if (conn->handle_fd<0) {
+        conn->stage = pn_closing_stage;
+        return;
+    }
+
+	if (conn->status!=pn_http_ok)
+	{
+		conn->stage = pn_closing_stage;
+		return;
+	}
+	
+    struct timeval tv_start;
+	struct timeval tv_now;
+	struct timeval tv_last;
+	
+	setsockopt(conn->sock, SOL_SOCKET, SO_SNDBUF, (void*)&bufsize, sizeof(bufsize));
+	
+	gettimeofday(&tv_start, (struct timezone *)0);
+	tv_last = tv_now;
+	
+	long long need_us = 0, total_readed=0;
+    for(;;) {
+
+		print_log(RSSLOG_LV_INFO,"PPPP file %d sock %lld scheduled %d\n", conn->handle_fd ,  conn->sock, total_readed );
+        bytes = conn->kfs_client->Read(conn->handle_fd , buff, READ_SIZE);
+		
+		if (bytes < 0 )
+		{	
+			print_log(RSSLOG_LV_ERROR,"read fd %d error:%s\n", conn->handle_fd, strerror(errno));
+			stable_send(conn->sock, "0\r\n\r\n" , 5 , NULL );//the lastest chunk 
+			break;
+			//error
+		}
+		else if (bytes==0)
+		{
+			print_log(RSSLOG_LV_INFO,"read fd %d EOF\n", conn->handle_fd);
+			
+			stable_send(conn->sock, "0\r\n\r\n" , 5 , NULL );//the lastest chunk 
+			break;		
+		}
+
+		char chunk_buf[64];
+		sprintf(chunk_buf, "%x\r\n", bytes);
+		printf("%s\n", chunk_buf);
+		
+		
+		
+		int ret = stable_send(conn->sock, chunk_buf, strlen(chunk_buf), NULL);
+		if (ret<=0)
+		{
+			print_log( RSSLOG_LV_INFO, "stable_send err1 %d\n", ret );
+			break;
+		}
+		total_readed+=bytes;
+       	print_log(RSSLOG_LV_INFO,"PPPP file %d sock %lld readed %d\n", conn->handle_fd ,  conn->sock, total_readed );
+		
+		//add chunk end
+		buff[bytes] = '\r' ;
+		buff[bytes+1] = '\n';
+		
+        ret = stable_send( conn->sock, buff, bytes + 2, NULL);
+		if (ret<=0)
+		{
+			print_log( RSSLOG_LV_INFO, "stable_send err2 %d\n", ret );
+			break;
+		}
+			
+		print_log(RSSLOG_LV_INFO,"PPPP file %d sock %lld sended %d\n", conn->handle_fd ,  conn->sock, total_readed );
+        
+
+		ret = posix_fadvise(conn->handle_fd, total_readed , READ_SIZE, POSIX_FADV_WILLNEED);
+		if (ret!=0)
+			print_log(RSSLOG_LV_ERROR,"posix_fadvise fd %d err %s\n", conn->handle_fd, strerror(errno));
+		
+		gettimeofday(&tv_now, (struct timezone *)0);
+		long long diff_us = time_difference(&tv_now,&tv_start);
+
+		need_us = 1000LL*1000LL*total_readed*8LL/g_bitrate_bps;
+		
+		long long diff = need_us - diff_us;
+		
+		print_log( RSSLOG_LV_INFO, "-----readed %lld diff %lld need_ms %lld diff_ms %lld\n", total_readed, diff, need_us/1000, diff_us/1000 );
+		
+		if (diff>1000000)
+			diff = 1000000;
+		
+		if (diff>10000)
+			usleep(diff);
+		else if(diff >0 )
+			usleep(10000);
+		
+		print_log( RSSLOG_LV_INFO, "sleep diff_ms %lld\n", diff/1000);
+    }
+    Close(conn->handle_fd);
+    conn->stage = pn_closing_stage;
+}
 
 
-//鍙戦€佹枃浠?
+//http response 发送文件的主体
 void connection_send_body(pn_connection_t *conn)
 {
     char buff[READ_SIZE+3];
@@ -1882,6 +2022,7 @@ void connection_send_body(pn_connection_t *conn)
 			print_log( RSSLOG_LV_INFO, "stable_send err2 %d\n", ret );
 			break;
 		}
+			
 			
 		print_log(RSSLOG_LV_INFO,"PPPP file %d sock %lld sended %d\n", conn->handle_fd ,  conn->sock, total_readed );
         
@@ -2300,6 +2441,9 @@ pn_connection_t *connection_new(int sock , pn_connection_t* conn) {
         conn->response  = pn_buffer_new( &conn->res_init );
         conn->uri       = pn_buffer_new( &conn->uri_init );
 		conn->d11_response = pn_buffer_new( &conn->d11_init);
+		
+		conn->fd = -1;
+		conn->kfs_client = NULL;
         /*
          if (!conn->request || !conn->response || !conn->uri) {
             pn_buffer_free(conn->request);
