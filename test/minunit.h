@@ -203,6 +203,8 @@ static void (*minunit_teardown)(void) = NULL;
 	}\
 )
 
+#define mu_assert_str_eq    mu_assert_string_eq
+
 #define mu_assert_string_eq(expected, result) MU__SAFE_BLOCK(\
 	const char* minunit_tmp_e = expected;\
 	const char* minunit_tmp_r = result;\
